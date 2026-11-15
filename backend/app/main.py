@@ -1,12 +1,13 @@
 """Point d'entrée de l'API Carénéo.
 
 Documentation interactive : http://localhost:8000/api/docs
-Contrat de référence : docs/openapi.yaml (vérifié par les tests).
+Contrat de référence : docs/openapi.yaml (les tests vérifient que l'API s'y conforme).
 """
 
 from fastapi import FastAPI
 
-from app.routers import system
+from app.errors import register_error_handlers
+from app.routers import auth, ports, shipyards, system, vessels
 
 
 def create_app() -> FastAPI:
@@ -17,8 +18,11 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
         docs_url="/api/docs",
         redoc_url=None,
+        swagger_ui_oauth2_redirect_url=None,
     )
-    app.include_router(system.router)
+    register_error_handlers(app)
+    for module in (auth, ports, vessels, shipyards, system):
+        app.include_router(module.router)
     return app
 
 

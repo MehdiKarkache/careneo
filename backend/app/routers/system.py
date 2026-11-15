@@ -1,12 +1,12 @@
 from typing import Literal
 
-from fastapi import APIRouter
 from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.deps import SessionDep
+from app.routers import api_router
 
-router = APIRouter(prefix="/api", tags=["Système"])
+router = api_router("Système")
 
 
 class Health(BaseModel):
