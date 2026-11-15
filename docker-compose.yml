@@ -1,0 +1,22 @@
+# Développement : `docker compose up -d db` démarre PostgreSQL seul.
+name: careneo
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: careneo
+      POSTGRES_PASSWORD: careneo
+      POSTGRES_DB: careneo
+    ports:
+      - "127.0.0.1:5432:5432" # accessible depuis la machine seulement
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U careneo -d careneo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
