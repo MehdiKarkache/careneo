@@ -4,6 +4,10 @@ Les méthodes du diagramme sont portées par les entités : User.has_role, Dock.
 Slot.overlaps et Slot.is_open, et les transitions de Booking (request, accept, reject, cancel),
 qui enregistrent chacune un BookingEvent.
 
+Dock.can_fit et les règles de Slot sont des méthodes hybrides : la même expression s'évalue en
+Python sur une instance (`dock.can_fit(navire)`) et produit une clause SQL sur la classe
+(`select(Slot).where(Dock.can_fit(navire))`). Chaque règle n'est donc écrite qu'une fois.
+
 Les invariants critiques sont aussi garantis par PostgreSQL, pour tenir même face à des
 requêtes concurrentes :
 - deux créneaux actifs d'un même poste ne se chevauchent pas (contrainte d'exclusion) ;
@@ -34,6 +38,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
+from sqlalchemy.ext.hybrid import hybrid_method
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain import (
@@ -45,7 +50,6 @@ from app.domain import (
     SlotUnavailable,
     VesselDoesNotFit,
     VesselType,
-    dates_overlap,
     ensure_transition,
     today,
     utcnow,
@@ -153,12 +157,15 @@ class Dock(UuidPk, Base):
 
     shipyard: Mapped[Shipyard] = relationship(back_populates="docks", lazy="raise_on_sql")
 
+    @hybrid_method
     def can_fit(self, vessel: "Vessel") -> bool:
-        """Règle de compatibilité : longueur, largeur et tirant d'eau dans les limites du poste."""
+        """Règle de compatibilité : longueur, largeur et tirant d'eau dans les limites du poste.
+
+        « & » plutôt que « and » : l'expression doit rester valable en SQL (méthode hybride)."""
         return (
-            vessel.length_m <= self.max_length_m
-            and vessel.beam_m <= self.max_beam_m
-            and vessel.draft_m <= self.max_draft_m
+            (vessel.length_m <= self.max_length_m)
+            & (vessel.beam_m <= self.max_beam_m)
+            & (vessel.draft_m <= self.max_draft_m)
         )
 
 
@@ -205,12 +212,16 @@ class Slot(UuidPk, Base):
         kwargs.setdefault("status", SlotStatus.OPEN)
         super().__init__(**kwargs)
 
+    @hybrid_method
     def overlaps(self, start: date, end: date) -> bool:
-        return dates_overlap(self.start_date, self.end_date, start, end)
+        """Chevauche la période [start, end], bornes incluses."""
+        return (self.start_date <= end) & (self.end_date >= start)
 
+    @hybrid_method
     def is_open(self) -> bool:
         return self.status == SlotStatus.OPEN
 
+    @hybrid_method
     def has_started(self) -> bool:
         return self.start_date <= today()
 
@@ -328,7 +339,10 @@ class Booking(UuidPk, Base):
         """PENDING → ACCEPTED ; le créneau passe BOOKED. Le créneau doit être chargé."""
         ensure_transition(self.status, BookingStatus.ACCEPTED)
         if not self.slot.is_open():
-            raise SlotUnavailable("Ce créneau est déjà attribué")
+            booked = self.slot.status == SlotStatus.BOOKED
+            raise SlotUnavailable(
+                "Ce créneau est déjà attribué" if booked else "Ce créneau est fermé"
+            )
         self._record(BookingStatus.ACCEPTED, by)
         self.slot.status = SlotStatus.BOOKED
 

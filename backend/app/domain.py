@@ -1,5 +1,5 @@
 """Règles métier pures, sans base de données ni HTTP : énumérations du diagramme de classes,
-machine à états des réservations, validation du numéro IMO et chevauchement de dates.
+machine à états des réservations et validation du numéro IMO.
 
 Les entités de app/models.py s'appuient sur ce module, testé unitairement.
 """
@@ -106,11 +106,6 @@ def ensure_transition(current: BookingStatus, target: BookingStatus) -> None:
     raise InvalidTransition(
         f"Transition interdite : {STATUS_LABELS[current]} → {STATUS_LABELS[target]}"
     )
-
-
-def dates_overlap(start_a: date, end_a: date, start_b: date, end_b: date) -> bool:
-    """Chevauchement de deux périodes de jours calendaires, bornes incluses."""
-    return start_a <= end_b and start_b <= end_a
 
 
 _IMO_FORMAT = re.compile(r"[0-9]{7}")

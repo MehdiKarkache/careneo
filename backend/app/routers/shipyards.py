@@ -106,14 +106,16 @@ async def create_slot(
     dock = await get_managed_dock(session, id, user)
     if body.start_date <= today():
         raise ValidationFailed(details={"startDate": "Un créneau commence au plus tôt demain"})
-    neighbours = await session.scalars(
-        select(Slot).where(
+    overlapping = await session.scalar(
+        select(Slot.id)
+        .where(
             Slot.dock_id == dock.id,
             Slot.status != SlotStatus.CLOSED,
-            Slot.end_date >= body.start_date,
+            Slot.overlaps(body.start_date, body.end_date),
         )
+        .limit(1)
     )
-    if any(slot.overlaps(body.start_date, body.end_date) for slot in neighbours):
+    if overlapping is not None:
         raise Conflict("Ce créneau chevauche un créneau existant du poste")
     slot = Slot(dock_id=dock.id, start_date=body.start_date, end_date=body.end_date)
     session.add(slot)

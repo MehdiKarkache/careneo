@@ -7,7 +7,7 @@ Contrat de référence : docs/openapi.yaml (les tests vérifient que l'API s'y c
 from fastapi import FastAPI
 
 from app.errors import register_error_handlers
-from app.routers import auth, ports, shipyards, system, vessels
+from app.routers import admin, auth, bookings, ports, search, shipyards, system, vessels
 
 
 def create_app() -> FastAPI:
@@ -21,7 +21,7 @@ def create_app() -> FastAPI:
         swagger_ui_oauth2_redirect_url=None,
     )
     register_error_handlers(app)
-    for module in (auth, ports, vessels, shipyards, system):
+    for module in (auth, ports, vessels, search, shipyards, bookings, admin, system):
         app.include_router(module.router)
     return app
 

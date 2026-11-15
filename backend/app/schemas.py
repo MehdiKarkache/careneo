@@ -6,8 +6,8 @@ les champs inconnus plutôt que de les ignorer silencieusement.
 
 import re
 import uuid
-from datetime import date
-from typing import Annotated
+from datetime import date, datetime
+from typing import Annotated, Any, Self
 
 from pydantic import (
     AfterValidator,
@@ -21,7 +21,16 @@ from pydantic import (
 )
 from pydantic.alias_generators import to_camel
 
-from app.domain import CompanyType, DockType, Role, SlotStatus, VesselType, is_valid_imo
+from app import models
+from app.domain import (
+    BookingStatus,
+    CompanyType,
+    DockType,
+    Role,
+    SlotStatus,
+    VesselType,
+    is_valid_imo,
+)
 
 
 class ApiModel(BaseModel):
@@ -210,3 +219,165 @@ class Slot(ApiModel):
     start_date: date
     end_date: date
     status: SlotStatus
+
+
+# ---------- Recherche ----------
+
+
+class SearchResult(ApiModel):
+    slot_id: uuid.UUID
+    start_date: date
+    end_date: date
+    dock: Dock
+    shipyard: ShipyardSummary
+    services: list[Service]
+    existing_booking_id: uuid.UUID | None = Field(
+        default=None,
+        description="Demande déjà en cours (PENDING ou ACCEPTED) de ce navire sur ce créneau",
+    )
+
+    @classmethod
+    def from_slot(cls, slot: models.Slot, existing_booking_id: uuid.UUID | None) -> Self:
+        """Le créneau doit être chargé avec son poste et le chantier (port, services)."""
+        shipyard = slot.dock.shipyard
+        return cls(
+            slot_id=slot.id,
+            start_date=slot.start_date,
+            end_date=slot.end_date,
+            dock=Dock.model_validate(slot.dock),
+            shipyard=ShipyardSummary.model_validate(shipyard),
+            services=[Service.model_validate(service) for service in shipyard.services],
+            existing_booking_id=existing_booking_id,
+        )
+
+
+# ---------- Réservations ----------
+
+
+class BookingInput(InputModel):
+    vessel_id: uuid.UUID
+    slot_id: uuid.UUID
+    service_ids: Annotated[
+        list[uuid.UUID], Field(min_length=1, json_schema_extra={"uniqueItems": True})
+    ]
+    message: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] | None = None
+
+    @field_validator("service_ids")
+    @classmethod
+    def _distinct(cls, service_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+        if len(set(service_ids)) != len(service_ids):
+            raise ValueError("Chaque service ne peut être choisi qu'une fois")
+        return service_ids
+
+    @field_validator("message")
+    @classmethod
+    def _blank_is_none(cls, message: str | None) -> str | None:
+        return message or None
+
+
+class RejectInput(InputModel):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=500)]
+
+
+class Requester(ApiModel):
+    id: uuid.UUID
+    name: str
+    company_name: str
+
+
+class BookingSlot(ApiModel):
+    id: uuid.UUID
+    start_date: date
+    end_date: date
+    dock: Dock
+    shipyard: ShipyardSummary
+
+
+class Booking(ApiModel):
+    id: uuid.UUID
+    status: BookingStatus
+    message: str | None = None
+    rejection_reason: str | None = None
+    created_at: datetime
+    decided_at: datetime | None = None
+    requested_by: Requester
+    vessel: VesselSummary
+    slot: BookingSlot
+    services: list[Service]
+
+    @classmethod
+    def from_model(cls, booking: models.Booking, **extra: Any) -> Self:
+        """La réservation doit être chargée avec son demandeur et son entreprise, son navire,
+        son créneau (poste, chantier, port) et ses services."""
+        requester, slot = booking.requested_by, booking.slot
+        return cls(
+            id=booking.id,
+            status=booking.status,
+            message=booking.message,
+            rejection_reason=booking.rejection_reason,
+            created_at=booking.created_at,
+            decided_at=booking.decided_at,
+            requested_by=Requester(
+                id=requester.id,
+                name=requester.name,
+                company_name=requester.company.name,  # un armateur a toujours une entreprise
+            ),
+            vessel=VesselSummary.model_validate(booking.vessel),
+            slot=BookingSlot(
+                id=slot.id,
+                start_date=slot.start_date,
+                end_date=slot.end_date,
+                dock=Dock.model_validate(slot.dock),
+                shipyard=ShipyardSummary.model_validate(slot.dock.shipyard),
+            ),
+            services=[Service.model_validate(service) for service in booking.services],
+            **extra,
+        )
+
+
+class BookingEvent(ApiModel):
+    id: uuid.UUID
+    from_status: BookingStatus | None = Field(
+        default=None, description="Absent pour l'événement de création"
+    )
+    to_status: BookingStatus
+    actor_id: uuid.UUID
+    actor_name: str
+    comment: str | None = None
+    created_at: datetime
+
+    @classmethod
+    def from_model(cls, event: models.BookingEvent) -> Self:
+        return cls(
+            id=event.id,
+            from_status=event.from_status,
+            to_status=event.to_status,
+            actor_id=event.actor_id,
+            actor_name=event.actor.name,
+            comment=event.comment,
+            created_at=event.created_at,
+        )
+
+
+class BookingDetail(Booking):
+    events: list[BookingEvent]
+
+    @classmethod
+    def from_model(cls, booking: models.Booking, **extra: Any) -> Self:
+        """Comme Booking.from_model, avec l'historique chargé (événements et leurs auteurs)."""
+        events = [BookingEvent.from_model(event) for event in booking.events]
+        return super().from_model(booking, events=events, **extra)
+
+
+# ---------- Admin ----------
+
+
+class ShipyardTotal(ApiModel):
+    shipyard_id: uuid.UUID
+    name: str
+    total: int
+
+
+class AdminStats(ApiModel):
+    by_status: dict[BookingStatus, int] = Field(description="Nombre de réservations par statut")
+    by_shipyard: list[ShipyardTotal]
