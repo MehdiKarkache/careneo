@@ -1,0 +1,120 @@
+% Présentation de l'architecture et des choix techniques (une page).
+% Compilation : latexmk -pdf architecture.tex
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[a4paper,margin=1.25cm,top=1.05cm,bottom=1.05cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[french]{babel}
+\usepackage{lmodern}% polices vectorielles (dont la chasse fixe)
+\usepackage[scaled=0.92]{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc}
+\usepackage{tabularx,array,booktabs}
+\usepackage{enumitem}
+\usepackage{multicol}
+\usepackage{titlesec}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{brand}{HTML}{0B3B5C}
+\definecolor{accent}{HTML}{0F766E}
+\definecolor{soft}{HTML}{EEF7FB}
+\definecolor{muted}{HTML}{55657A}
+
+\pagestyle{empty}
+\linespread{1.07}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+\setlength{\columnsep}{16pt}
+\setlist{nosep,itemsep=2.5pt,leftmargin=1.1em,label={\color{accent}\scriptsize$\bullet$}}
+\titleformat{\section}{\color{brand}\bfseries\large}{\thesection.}{0.4em}{}
+\titlespacing*{\section}{0pt}{9pt}{3pt}
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\begin{document}
+
+% ---------- En-tête ----------
+{\color{brand}\fontsize{20}{22}\selectfont\bfseries Carénéo}\hfill
+{\small\color{muted}\begin{tabular}[b]{@{}r@{}}
+El Mehdi KARKACHE $\cdot$ stage Full Stack \& IA, PUREGLIDE\\
+\href{https://github.com/MehdiKarkache/careneo}{github.com/MehdiKarkache/careneo} $\cdot$ novembre 2026
+\end{tabular}}\\[1pt]
+{\color{muted}Plateforme de réservation de créneaux de carénage : architecture et choix techniques}
+
+\vspace{-2pt}
+\section{Architecture}
+
+\begin{center}
+\begin{tikzpicture}[
+  box/.style={draw=brand, fill=soft, rounded corners=3pt, align=center, font=\scriptsize,
+              text width=3.55cm, minimum height=1.25cm, inner sep=3pt},
+  title/.style={font=\footnotesize\bfseries\color{brand}},
+  arrow/.style={-{Latex[length=2mm]}, thick, brand},
+  link/.style={font=\tiny\color{muted}, align=center},
+]
+\node[box] (web) {{\footnotesize\bfseries\color{brand} Navigateur}\\React 19 $\cdot$ TypeScript $\cdot$ Vite\\TanStack Query $\cdot$ Tailwind};
+\node[box, right=1.05cm of web] (proxy) {{\footnotesize\bfseries\color{brand} nginx}\\fichiers statiques\\relais de \code{/api}};
+\node[box, right=1.05cm of proxy] (api) {{\footnotesize\bfseries\color{brand} FastAPI $\cdot$ Python 3.12}\\routes $\rightarrow$ cas d'usage $\rightarrow$ domaine\\Pydantic $\cdot$ gardes de rôle};
+\node[box, right=1.05cm of api] (db) {{\footnotesize\bfseries\color{brand} PostgreSQL 17}\\SQLAlchemy 2 async $\cdot$ Alembic\\invariants en contraintes};
+\draw[arrow] (web) -- node[link, above] {HTTPS} (proxy);
+\draw[arrow] (proxy) -- node[link, above] {\ttfamily /api} (api);
+\draw[arrow] (api) -- node[link, above] {SQL} (db);
+\node[box, draw=accent, fill=accent!8, text width=13.05cm, minimum height=0.55cm, anchor=north west]
+  (contract) at ($(web.south west)+(0,-0.62cm)$)
+  {{\bfseries\color{accent} Contrat OpenAPI 3.1} (\code{docs/openapi.yaml}), source de vérité partagée par le front et l'API};
+\draw[-{Latex[length=1.6mm]}, dashed, accent] (web.south |- contract.north) -- node[link, right] {types TypeScript générés} (web.south);
+\draw[-{Latex[length=1.6mm]}, dashed, accent] (api.south |- contract.north) -- node[link, right] {test de conformité} (api.south);
+\end{tikzpicture}
+\end{center}
+
+\vspace{-4pt}
+{\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabularx}{\linewidth}{@{}>{\bfseries\color{brand}}p{2.05cm}X@{}}
+\toprule
+Frontend & React + TypeScript (Vite) : application monopage rapide à construire. TanStack Query gère cache et rafraîchissement, Tailwind une interface sobre. Les types de l'API sont \textbf{générés depuis le contrat} : une divergence casse la compilation, pas l'application. \\
+Backend & FastAPI (async) : validation Pydantic, OpenAPI natif, écosystème Python prêt pour les briques d'IA. Routes minces, cas d'usage transactionnels, domaine : les méthodes du diagramme de classes (\code{Dock.canFit}, \code{Slot.overlaps}, \code{Booking.accept}…) sont portées par les entités, en \emph{méthodes hybrides} : la même règle sert en Python et en SQL. \\
+Données & PostgreSQL, SQLAlchemy 2, migrations Alembic. \textbf{Prisma écarté} : son client Python est archivé depuis avril 2025. Les invariants critiques sont garantis par la base : contrainte d'exclusion (pas de créneaux qui se chevauchent sur un poste), index uniques partiels (une seule demande acceptée par créneau, une seule demande active par navire et créneau), contraintes \code{CHECK}. \\
+Utilisateurs & Rôles armateur, chantier et administrateur, rattachés à une entreprise. Session par cookie httpOnly SameSite=Lax (jeton signé qui ne porte que l'identifiant : rôle et entreprise relus en base), mots de passe Argon2id. L'API applique les gardes (401, 403, 404) ; un test vérifie qu'elles correspondent aux \code{x-roles} du contrat. \\
+Hébergement & Images Docker : API et front servi par nginx, qui relaie \code{/api} (une seule origine, sans CORS). \code{docker compose up} lance tout. Cible : cloud européen (Scaleway, OVHcloud), PostgreSQL managé avec sauvegardes, HTTPS. \\
+\bottomrule
+\end{tabularx}}
+
+\begin{multicols}{2}
+\section{Prototype réalisé}
+\begin{itemize}
+  \item \textbf{Parcours complet.} L'armateur enregistre ses navires (IMO avec clé de contrôle), cherche les créneaux compatibles d'un port et envoie une demande avec ses prestations. Le chantier ouvre des créneaux, accepte ou refuse avec un motif. L'administrateur suit les statistiques.
+  \item \textbf{Acceptation transactionnelle.} Le créneau passe \code{BOOKED}, les demandes rivales sont refusées automatiquement, chaque transition est historisée (\code{BookingEvent}).
+  \item \textbf{Concurrence.} Verrous pris toujours dans le même ordre (créneau, demande, navire) : pas d'interblocage, une seule acceptation gagne. Les contraintes PostgreSQL restent le dernier filet.
+  \item \textbf{Qualité.} 21 opérations du contrat, 56 tests (domaine, API, concurrence, conformité au contrat), données de démonstration.
+\end{itemize}
+
+\columnbreak
+\section{Utilisation de l'IA}
+J'ai conçu en amont le diagramme de classes et le contrat OpenAPI, puis utilisé \textbf{Claude Code} (Anthropic, modèle Claude Opus) dans VS Code comme agent de développement, étape par étape, chaque étape étant validée puis versionnée par un commit :
+\begin{itemize}
+  \item génération du code et des tests à partir du diagramme et du contrat ;
+  \item vérifications : scénarios HTTP, courses concurrentes, contrôle de l'interface dans le navigateur ;
+  \item veille : l'IA a signalé que Prisma Client Python était archivé, et j'ai retenu SQLAlchemy ; elle a aussi repéré des incompatibilités de versions récentes (TypeScript 7).
+\end{itemize}
+Mon rôle : conception, choix techniques, arbitrages et validation.
+
+\section{Perspectives}
+\begin{itemize}
+  \item \textbf{Produit} : devis et tarifs réels, acompte en ligne, calendrier des disponibilités, notifications (e-mail, SMS), documents (rapports d'inspection, certificats), expiration automatique des demandes, clôture des carénages.
+  \item \textbf{Comptes} : SSO via un fournisseur d'identité (Keycloak, Entra ID), invitations et plusieurs utilisateurs par entreprise, MFA, limitation des tentatives de connexion.
+  \item \textbf{Industrialisation} : CI/CD, supervision (journaux, métriques, alertes), sauvegardes, conformité RGPD, tests de bout en bout, pagination.
+  \item \textbf{IA} : recommander la période de carénage et les prestations selon l'encrassement estimé de la coque (surconsommation, données AIS), prévoir la demande des chantiers.
+\end{itemize}
+\end{multicols}
+
+\vfill
+\noindent\colorbox{soft}{\parbox{\dimexpr\linewidth-2\fboxsep}{\small\raggedright
+\textbf{\color{brand}Lancer la démo} : \code{docker compose up -{}-build}, puis \url{http://localhost:8080}.
+Comptes \code{armateur@careneo.demo}, \code{chantier@careneo.demo}, \code{admin@careneo.demo},
+mot de passe \code{demo1234}. Documentation interactive de l'API : \url{http://localhost:8080/api/docs}.}}
+
+\end{document}

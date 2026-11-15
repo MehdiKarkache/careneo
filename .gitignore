@@ -15,6 +15,14 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# LaTeX (seuls le .tex et le PDF sont versionnés)
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+
 # Environnement (secrets)
 .env
 .env.*
