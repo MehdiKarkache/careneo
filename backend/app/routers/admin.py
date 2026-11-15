@@ -17,7 +17,7 @@ router = api_router("Admin")
 )
 async def get_admin_stats(session: SessionDep) -> schemas.AdminStats:
     by_status = await session.execute(select(Booking.status, func.count()).group_by(Booking.status))
-    counts = dict(by_status.tuples().all())
+    counts = dict(by_status.all())
 
     total = func.count(Booking.id)
     by_shipyard = await session.execute(
@@ -32,6 +32,6 @@ async def get_admin_stats(session: SessionDep) -> schemas.AdminStats:
         by_status={status: counts.get(status, 0) for status in BookingStatus},
         by_shipyard=[
             schemas.ShipyardTotal(shipyard_id=shipyard_id, name=name, total=count)
-            for shipyard_id, name, count in by_shipyard.tuples()
+            for shipyard_id, name, count in by_shipyard
         ],
     )

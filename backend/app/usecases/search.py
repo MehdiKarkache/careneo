@@ -52,5 +52,5 @@ async def search_compatible_slots(
             Booking.status.in_(ACTIVE_STATUSES),
         )
     )
-    existing = dict(active_requests.tuples().all())
+    existing = dict(active_requests.all())
     return [(slot, existing.get(slot.id)) for slot in slots]
