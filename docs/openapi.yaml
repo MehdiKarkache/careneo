@@ -1,0 +1,879 @@
+openapi: 3.1.0
+info:
+  title: Carénéo API
+  version: 0.3.0
+  description: |
+    Contrat de l'API REST de Carénéo, plateforme de réservation de créneaux de carénage.
+
+    Principes :
+    - Authentification par cookie de session httpOnly posé par l'API à la connexion
+      (`POST /api/auth/login`). Le rôle et l'entreprise de l'utilisateur sont lus côté serveur
+      à partir de la session, jamais dans un paramètre envoyé par le client.
+    - Les listes sont filtrées côté serveur selon l'utilisateur connecté.
+    - Les changements de statut d'une réservation sont des actions explicites
+      (`/accept`, `/reject`, `/cancel`), chacune avec sa propre garde de rôle et d'état.
+    - Le rôle requis par chaque opération est indiqué dans `x-roles`.
+    - Les dates de créneau sont des jours calendaires (`AAAA-MM-JJ`), bornes incluses.
+
+    Codes d'erreur : 400 données invalides, 401 non connecté, 403 mauvais rôle ou ressource
+    d'une autre entreprise, 404 introuvable, 409 conflit (créneau déjà attribué, transition interdite),
+    500 erreur interne.
+
+    Évolutions 0.2.0 (ajouts rétrocompatibles, issus du prototype) : `Booking.requestedBy`,
+    `BookingEvent.actorName`, `SearchResult.existingBookingId`, `GET /api/docks/{id}/slots`,
+    code d'erreur `INTERNAL_ERROR`, prix indicatif en euros entiers.
+
+    Évolutions 0.3.0 (passage de Next.js/Auth.js à FastAPI + React) : routes `POST /api/auth/login`,
+    `POST /api/auth/logout` et `GET /api/auth/me`, auparavant fournies par Auth.js ;
+    `GET /api/shipyards`, nécessaire au front React pour lister les chantiers (un utilisateur
+    chantier n'y voit que les siens) ; `GET /api/health` ; validation des données par Pydantic.
+servers:
+  - url: http://localhost:8000
+    description: API FastAPI en local (aussi servie par le proxy Vite sur http://localhost:5173)
+tags:
+  - name: Authentification
+  - name: Référentiel
+  - name: Navires
+  - name: Recherche
+  - name: Chantiers
+  - name: Réservations
+  - name: Admin
+  - name: Système
+security:
+  - sessionCookie: []
+
+paths:
+  /api/auth/login:
+    post:
+      tags: [Authentification]
+      summary: Se connecter
+      description: |
+        Vérifie l'email et le mot de passe, puis pose le cookie de session httpOnly.
+        La réponse est identique que l'email soit inconnu ou que le mot de passe soit faux.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginInput" }
+      responses:
+        "200":
+          description: Connecté, cookie de session posé
+          headers:
+            Set-Cookie:
+              description: "`careneo_session=<jeton>; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`"
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401":
+          description: Email ou mot de passe incorrect
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: { code: UNAUTHENTICATED, message: Email ou mot de passe incorrect }
+
+  /api/auth/logout:
+    post:
+      tags: [Authentification]
+      summary: Se déconnecter
+      description: Supprime le cookie de session. Sans effet si l'utilisateur n'est pas connecté.
+      operationId: logout
+      security: []
+      responses:
+        "204":
+          description: Déconnecté
+
+  /api/auth/me:
+    get:
+      tags: [Authentification]
+      summary: Utilisateur connecté
+      operationId: getMe
+      x-roles: [OWNER, YARD, ADMIN]
+      responses:
+        "200":
+          description: Utilisateur connecté, avec son rôle et son entreprise
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /api/ports:
+    get:
+      tags: [Référentiel]
+      summary: Lister les ports
+      operationId: listPorts
+      x-roles: [OWNER, YARD, ADMIN]
+      responses:
+        "200":
+          description: Liste des ports
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Port" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /api/vessels:
+    get:
+      tags: [Navires]
+      summary: Lister les navires de mon entreprise
+      operationId: listVessels
+      x-roles: [OWNER]
+      responses:
+        "200":
+          description: Navires de l'entreprise de l'utilisateur connecté
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Vessel" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Navires]
+      summary: Créer un navire
+      operationId: createVessel
+      x-roles: [OWNER]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VesselInput" }
+      responses:
+        "201":
+          description: Navire créé
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Vessel" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Un navire avec ce numéro IMO existe déjà
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/vessels/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    patch:
+      tags: [Navires]
+      summary: Modifier un de mes navires
+      operationId: updateVessel
+      x-roles: [OWNER]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VesselUpdate" }
+      responses:
+        "200":
+          description: Navire modifié
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Vessel" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/search:
+    get:
+      tags: [Recherche]
+      summary: Rechercher les créneaux ouverts et compatibles avec un navire
+      description: |
+        Renvoie les créneaux OPEN des chantiers du port demandé qui chevauchent la période
+        [from, to], qui ne sont pas déjà commencés, et dont le poste accepte les dimensions du navire
+        (longueur, largeur et tirant d'eau inférieurs ou égaux aux maxima du poste).
+      operationId: searchSlots
+      x-roles: [OWNER]
+      parameters:
+        - name: portId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - name: vesselId
+          in: query
+          required: true
+          description: Navire de l'entreprise de l'utilisateur
+          schema: { type: string, format: uuid }
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date }
+          example: "2027-03-01"
+        - name: to
+          in: query
+          required: true
+          description: Doit être postérieure ou égale à `from`
+          schema: { type: string, format: date }
+          example: "2027-03-31"
+      responses:
+        "200":
+          description: Créneaux compatibles, triés par date de début
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SearchResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/shipyards:
+    get:
+      tags: [Chantiers]
+      summary: Lister les chantiers
+      description: |
+        Armateur et admin : tous les chantiers. Chantier : uniquement ceux de son entreprise.
+      operationId: listShipyards
+      x-roles: [OWNER, YARD, ADMIN]
+      parameters:
+        - name: portId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Chantiers triés par nom
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ShipyardSummary" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /api/shipyards/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [Chantiers]
+      summary: Fiche d'un chantier (postes et services)
+      operationId: getShipyard
+      x-roles: [OWNER, YARD, ADMIN]
+      responses:
+        "200":
+          description: Fiche chantier
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShipyardDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/shipyards/{id}/services:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [Chantiers]
+      summary: Ajouter un service à mon chantier
+      operationId: createService
+      x-roles: [YARD]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServiceInput" }
+      responses:
+        "201":
+          description: Service créé
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Service" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/docks/{id}/slots:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [Chantiers]
+      summary: Lister les créneaux d'un poste
+      description: Créneaux non terminés du poste, triés par date de début.
+      operationId: listDockSlots
+      x-roles: [YARD, ADMIN]
+      responses:
+        "200":
+          description: Créneaux du poste
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Slot" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Chantiers]
+      summary: Ouvrir un créneau sur un de mes postes
+      description: Refusé (409) si le créneau chevauche un créneau existant du même poste.
+      operationId: createSlot
+      x-roles: [YARD]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SlotInput" }
+      responses:
+        "201":
+          description: Créneau créé, statut OPEN
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Slot" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/bookings:
+    get:
+      tags: [Réservations]
+      summary: Lister les réservations visibles par l'utilisateur
+      description: |
+        Armateur : les réservations de ses navires.
+        Chantier : les réservations portant sur ses postes.
+        Admin : toutes les réservations.
+      operationId: listBookings
+      x-roles: [OWNER, YARD, ADMIN]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/BookingStatus" }
+      responses:
+        "200":
+          description: Réservations, les plus récentes en premier
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Booking" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      tags: [Réservations]
+      summary: Envoyer une demande de réservation
+      description: |
+        Le navire doit appartenir à l'entreprise de l'utilisateur, le créneau doit être OPEN
+        et son poste doit accepter les dimensions du navire. Les services doivent appartenir
+        au chantier du créneau. La réservation est créée avec le statut PENDING.
+
+        409 si : le créneau n'est plus réservable, le navire dépasse la capacité du poste,
+        une demande est déjà en cours pour ce navire sur ce créneau, ou le navire a déjà
+        un carénage confirmé sur une période qui chevauche.
+      operationId: createBooking
+      x-roles: [OWNER]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BookingInput" }
+      responses:
+        "201":
+          description: Demande créée, statut PENDING
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/bookings/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      tags: [Réservations]
+      summary: Détail d'une réservation et son historique
+      operationId: getBooking
+      x-roles: [OWNER, YARD, ADMIN]
+      responses:
+        "200":
+          description: Réservation avec historique des transitions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/bookings/{id}/accept:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [Réservations]
+      summary: Accepter une demande
+      description: |
+        Transition PENDING → ACCEPTED, dans une transaction :
+        le créneau passe BOOKED, les autres demandes PENDING du même créneau passent REJECTED
+        (motif « Créneau attribué à une autre demande ») et un BookingEvent est enregistré
+        pour chaque transition.
+        Renvoie 409 si la demande n'est plus PENDING, si le créneau est déjà attribué ou si le
+        navire a déjà un carénage confirmé sur une période qui chevauche.
+      operationId: acceptBooking
+      x-roles: [YARD]
+      responses:
+        "200":
+          description: Demande acceptée
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/bookings/{id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [Réservations]
+      summary: Refuser une demande avec un motif
+      description: Transition PENDING → REJECTED. Le créneau reste ouvert.
+      operationId: rejectBooking
+      x-roles: [YARD]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RejectInput" }
+      responses:
+        "200":
+          description: Demande refusée
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/bookings/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      tags: [Réservations]
+      summary: Annuler ma demande en attente
+      description: |
+        Transition PENDING → CANCELLED, uniquement par l'armateur qui a fait la demande
+        (tout utilisateur de l'entreprise propriétaire du navire).
+      operationId: cancelBooking
+      x-roles: [OWNER]
+      responses:
+        "200":
+          description: Demande annulée
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Booking" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/admin/stats:
+    get:
+      tags: [Admin]
+      summary: Compteurs par statut et par chantier
+      operationId: getAdminStats
+      x-roles: [ADMIN]
+      responses:
+        "200":
+          description: Statistiques globales
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminStats" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/health:
+    get:
+      tags: [Système]
+      summary: État de l'API et de la base de données
+      operationId: health
+      security: []
+      responses:
+        "200":
+          description: API et base de données opérationnelles
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+        "500":
+          description: Base de données injoignable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: careneo_session
+      description: |
+        Cookie de session httpOnly (SameSite=Lax, Secure en HTTPS) posé par `POST /api/auth/login`.
+        Il contient un jeton signé (JWT HS256, valable 8 h) qui ne porte que l'identifiant de
+        l'utilisateur : le rôle et l'entreprise sont relus en base à chaque requête.
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    ValidationError:
+      description: Données invalides (validation Pydantic)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Données invalides
+              details:
+                to: La date de fin doit suivre la date de début
+    Unauthenticated:
+      description: Utilisateur non connecté
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: UNAUTHENTICATED, message: Connexion requise }
+    Forbidden:
+      description: Mauvais rôle, ou ressource appartenant à une autre entreprise
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: FORBIDDEN, message: Accès refusé }
+    NotFound:
+      description: Ressource introuvable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: NOT_FOUND, message: Ressource introuvable }
+    Conflict:
+      description: Conflit d'état (demande déjà traitée, créneau déjà attribué, chevauchement)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: { code: CONFLICT, message: Demande déjà traitée }
+
+  schemas:
+    # ---------- Énumérations ----------
+    Role:
+      type: string
+      enum: [OWNER, YARD, ADMIN]
+    CompanyType:
+      type: string
+      enum: [SHIPOWNER, SHIPYARD]
+    VesselType:
+      type: string
+      enum: [FERRY, CONTAINER_SHIP, TANKER, RO_RO, OTHER]
+    DockType:
+      type: string
+      enum: [DRY_DOCK, FLOATING_DOCK, SHIPLIFT]
+    SlotStatus:
+      type: string
+      enum: [OPEN, BOOKED, CLOSED]
+    BookingStatus:
+      type: string
+      description: EXPIRED et COMPLETED sont prévus mais non utilisés par le prototype.
+      enum: [PENDING, ACCEPTED, REJECTED, CANCELLED, EXPIRED, COMPLETED]
+
+    # ---------- Authentification ----------
+    LoginInput:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, example: armateur@careneo.demo }
+        password: { type: string, format: password, minLength: 1, example: demo1234 }
+    CompanySummary:
+      type: object
+      required: [id, name, type]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        type: { $ref: "#/components/schemas/CompanyType" }
+    Me:
+      type: object
+      required: [id, email, name, role]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        name: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        company:
+          description: Absent pour un administrateur
+          $ref: "#/components/schemas/CompanySummary"
+
+    # ---------- Référentiel ----------
+    Port:
+      type: object
+      required: [id, name, country, unlocode]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Marseille }
+        country: { type: string, example: FR }
+        unlocode: { type: string, pattern: "^[A-Z]{5}$", example: FRMRS }
+
+    # ---------- Navires ----------
+    VesselInput:
+      type: object
+      required: [name, imo, type, lengthM, beamM, draftM]
+      properties:
+        name: { type: string, minLength: 1, example: Ferry de démo }
+        imo:
+          type: string
+          pattern: "^[0-9]{7}$"
+          description: |
+            Numéro IMO à 7 chiffres, unique sur la plateforme. Le 7e chiffre est une clé de
+            contrôle (somme des 6 premiers pondérés par 7, 6, 5, 4, 3, 2, modulo 10).
+          example: "9421001"
+        type: { $ref: "#/components/schemas/VesselType" }
+        lengthM: { type: number, exclusiveMinimum: 0, description: Longueur hors-tout en mètres }
+        beamM: { type: number, exclusiveMinimum: 0, description: Largeur en mètres }
+        draftM: { type: number, exclusiveMinimum: 0, description: Tirant d'eau en mètres }
+        grossTonnage: { type: integer, minimum: 0, description: Jauge brute }
+    VesselUpdate:
+      type: object
+      description: Tous les champs sont optionnels ; seuls ceux envoyés sont modifiés.
+      properties:
+        name: { type: string, minLength: 1 }
+        type: { $ref: "#/components/schemas/VesselType" }
+        lengthM: { type: number, exclusiveMinimum: 0 }
+        beamM: { type: number, exclusiveMinimum: 0 }
+        draftM: { type: number, exclusiveMinimum: 0 }
+        grossTonnage: { type: integer, minimum: 0 }
+    Vessel:
+      allOf:
+        - $ref: "#/components/schemas/VesselInput"
+        - type: object
+          required: [id, companyId]
+          properties:
+            id: { type: string, format: uuid }
+            companyId: { type: string, format: uuid }
+    VesselSummary:
+      type: object
+      required: [id, name, imo, type]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        imo: { type: string }
+        type: { $ref: "#/components/schemas/VesselType" }
+
+    # ---------- Chantiers ----------
+    Dock:
+      type: object
+      required: [id, name, type, maxLengthM, maxBeamM, maxDraftM]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Forme 1 }
+        type: { $ref: "#/components/schemas/DockType" }
+        maxLengthM: { type: number }
+        maxBeamM: { type: number }
+        maxDraftM: { type: number }
+    ServiceInput:
+      type: object
+      required: [name, category]
+      properties:
+        name: { type: string, minLength: 1, example: Application d'antifouling }
+        category: { type: string, example: ANTIFOULING }
+        indicativePrice:
+          type: integer
+          minimum: 0
+          description: Prix indicatif en euros HT
+    Service:
+      allOf:
+        - $ref: "#/components/schemas/ServiceInput"
+        - type: object
+          required: [id]
+          properties:
+            id: { type: string, format: uuid }
+    ShipyardSummary:
+      type: object
+      required: [id, name, port]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        port: { $ref: "#/components/schemas/Port" }
+    ShipyardDetail:
+      allOf:
+        - $ref: "#/components/schemas/ShipyardSummary"
+        - type: object
+          required: [docks, services]
+          properties:
+            description: { type: string }
+            docks:
+              type: array
+              items: { $ref: "#/components/schemas/Dock" }
+            services:
+              type: array
+              items: { $ref: "#/components/schemas/Service" }
+
+    # ---------- Créneaux et recherche ----------
+    SlotInput:
+      type: object
+      required: [startDate, endDate]
+      properties:
+        startDate: { type: string, format: date }
+        endDate:
+          type: string
+          format: date
+          description: Doit être postérieure ou égale à startDate
+    Slot:
+      allOf:
+        - $ref: "#/components/schemas/SlotInput"
+        - type: object
+          required: [id, dockId, status]
+          properties:
+            id: { type: string, format: uuid }
+            dockId: { type: string, format: uuid }
+            status: { $ref: "#/components/schemas/SlotStatus" }
+    SearchResult:
+      type: object
+      required: [slotId, startDate, endDate, dock, shipyard, services]
+      properties:
+        slotId: { type: string, format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        dock: { $ref: "#/components/schemas/Dock" }
+        shipyard: { $ref: "#/components/schemas/ShipyardSummary" }
+        services:
+          type: array
+          items: { $ref: "#/components/schemas/Service" }
+        existingBookingId:
+          type: string
+          format: uuid
+          description: Demande déjà en cours (PENDING ou ACCEPTED) de ce navire sur ce créneau
+
+    # ---------- Réservations ----------
+    BookingInput:
+      type: object
+      required: [vesselId, slotId, serviceIds]
+      properties:
+        vesselId: { type: string, format: uuid }
+        slotId: { type: string, format: uuid }
+        serviceIds:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { type: string, format: uuid }
+        message: { type: string, maxLength: 2000 }
+    RejectInput:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+          example: Poste indisponible pour maintenance
+    Requester:
+      type: object
+      description: Utilisateur qui a envoyé la demande, et son entreprise
+      required: [id, name, companyName]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        companyName: { type: string }
+    Booking:
+      type: object
+      required: [id, status, createdAt, vessel, slot, services, requestedBy]
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/BookingStatus" }
+        message: { type: string }
+        rejectionReason: { type: string }
+        createdAt: { type: string, format: date-time }
+        decidedAt: { type: string, format: date-time }
+        requestedBy: { $ref: "#/components/schemas/Requester" }
+        vessel: { $ref: "#/components/schemas/VesselSummary" }
+        slot:
+          type: object
+          required: [id, startDate, endDate, dock, shipyard]
+          properties:
+            id: { type: string, format: uuid }
+            startDate: { type: string, format: date }
+            endDate: { type: string, format: date }
+            dock: { $ref: "#/components/schemas/Dock" }
+            shipyard: { $ref: "#/components/schemas/ShipyardSummary" }
+        services:
+          type: array
+          items: { $ref: "#/components/schemas/Service" }
+    BookingEvent:
+      type: object
+      required: [id, toStatus, actorId, actorName, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        fromStatus:
+          description: Absent pour l'événement de création
+          $ref: "#/components/schemas/BookingStatus"
+        toStatus: { $ref: "#/components/schemas/BookingStatus" }
+        actorId: { type: string, format: uuid }
+        actorName: { type: string }
+        comment: { type: string }
+        createdAt: { type: string, format: date-time }
+    BookingDetail:
+      allOf:
+        - $ref: "#/components/schemas/Booking"
+        - type: object
+          required: [events]
+          properties:
+            events:
+              type: array
+              items: { $ref: "#/components/schemas/BookingEvent" }
+
+    # ---------- Admin ----------
+    AdminStats:
+      type: object
+      required: [byStatus, byShipyard]
+      properties:
+        byStatus:
+          type: object
+          description: Nombre de réservations par statut
+          additionalProperties: { type: integer }
+          example: { PENDING: 4, ACCEPTED: 7, REJECTED: 2, CANCELLED: 1 }
+        byShipyard:
+          type: array
+          items:
+            type: object
+            required: [shipyardId, name, total]
+            properties:
+              shipyardId: { type: string, format: uuid }
+              name: { type: string }
+              total: { type: integer }
+
+    # ---------- Erreurs ----------
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [VALIDATION_ERROR, UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, CONFLICT, INTERNAL_ERROR]
+            message: { type: string }
+            details:
+              type: object
+              additionalProperties: true
